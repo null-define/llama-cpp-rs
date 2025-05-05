@@ -27,7 +27,7 @@ fn main() {
         "<|im_start|>user\nHello! how are you?<|im_end|>\n<|im_start|>assistant\n".to_string();
     LlamaContextParams::default();
     let model =
-        LlamaModel::load_from_file(&backend, model_path, &params).expect("unable to load model");
+        LlamaModel::load_from_file(&backend, model_path, &params).expect("unable to load model").to_arc();
     let ctx_params = LlamaContextParams::default();
     let mut ctx = model
         .new_context(&backend, ctx_params)

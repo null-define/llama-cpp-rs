@@ -124,7 +124,7 @@ impl LlamaTokenDataArray {
     pub fn apply_sampler(&mut self, sampler: &LlamaSampler) {
         unsafe {
             self.modify_as_c_llama_token_data_array(|c_llama_token_data_array| {
-                llama_cpp_sys_2::llama_sampler_apply(sampler.sampler, c_llama_token_data_array);
+                llama_cpp_sys_2::llama_sampler_apply(*sampler.sampler.lock().unwrap(), c_llama_token_data_array);
             });
         }
     }

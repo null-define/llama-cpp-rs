@@ -4,6 +4,7 @@ use std::fmt::{Debug, Formatter};
 use std::num::NonZeroI32;
 use std::ptr::NonNull;
 use std::slice;
+use std::sync::{Arc, Mutex};
 
 use crate::llama_batch::LlamaBatch;
 use crate::model::{LlamaLoraAdapter, LlamaModel};
@@ -22,30 +23,34 @@ pub mod session;
 
 /// Safe wrapper around `llama_context`.
 #[allow(clippy::module_name_repetitions)]
-pub struct LlamaContext<'a> {
-    pub(crate) context: NonNull<llama_cpp_sys_2::llama_context>,
+pub struct LlamaContext {
+    pub(crate) context: Mutex<NonNull<llama_cpp_sys_2::llama_context>>,
     /// a reference to the contexts model.
-    pub model: &'a LlamaModel,
+    pub model: Arc<LlamaModel>,
     initialized_logits: Vec<i32>,
     embeddings_enabled: bool,
 }
 
-impl Debug for LlamaContext<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+unsafe impl Send for LlamaContext {}
+
+unsafe impl Sync for LlamaContext {}
+
+impl Debug for LlamaContext{
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         f.debug_struct("LlamaContext")
             .field("context", &self.context)
             .finish()
     }
 }
 
-impl<'model> LlamaContext<'model> {
+impl LlamaContext{
     pub(crate) fn new(
-        llama_model: &'model LlamaModel,
+        llama_model: Arc<LlamaModel>,
         llama_context: NonNull<llama_cpp_sys_2::llama_context>,
         embeddings_enabled: bool,
     ) -> Self {
         Self {
-            context: llama_context,
+            context: Mutex::new(llama_context),
             model: llama_model,
             initialized_logits: Vec::new(),
             embeddings_enabled,
@@ -55,19 +60,19 @@ impl<'model> LlamaContext<'model> {
     /// Gets the max number of logical tokens that can be submitted to decode. Must be greater than or equal to [`Self::n_ubatch`].
     #[must_use]
     pub fn n_batch(&self) -> u32 {
-        unsafe { llama_cpp_sys_2::llama_n_batch(self.context.as_ptr()) }
+        unsafe { llama_cpp_sys_2::llama_n_batch(self.context.lock().unwrap().as_ptr()) }
     }
 
     /// Gets the max number of physical tokens (hardware level) to decode in batch. Must be less than or equal to [`Self::n_batch`].
     #[must_use]
     pub fn n_ubatch(&self) -> u32 {
-        unsafe { llama_cpp_sys_2::llama_n_ubatch(self.context.as_ptr()) }
+        unsafe { llama_cpp_sys_2::llama_n_ubatch(self.context.lock().unwrap().as_ptr()) }
     }
 
     /// Gets the size of the context.
     #[must_use]
     pub fn n_ctx(&self) -> u32 {
-        unsafe { llama_cpp_sys_2::llama_n_ctx(self.context.as_ptr()) }
+        unsafe { llama_cpp_sys_2::llama_n_ctx(self.context.lock().unwrap().as_ptr()) }
     }
 
     /// Decodes the batch.
@@ -81,7 +86,7 @@ impl<'model> LlamaContext<'model> {
     /// - the returned [`std::ffi::c_int`] from llama-cpp does not fit into a i32 (this should never happen on most systems)
     pub fn decode(&mut self, batch: &mut LlamaBatch) -> Result<(), DecodeError> {
         let result =
-            unsafe { llama_cpp_sys_2::llama_decode(self.context.as_ptr(), batch.llama_batch) };
+            unsafe { llama_cpp_sys_2::llama_decode(self.context.lock().unwrap().as_ptr(), *batch.llama_batch.lock().unwrap()) };
 
         match NonZeroI32::new(result) {
             None => {
@@ -104,7 +109,7 @@ impl<'model> LlamaContext<'model> {
     /// - the returned [`std::ffi::c_int`] from llama-cpp does not fit into a i32 (this should never happen on most systems)
     pub fn encode(&mut self, batch: &mut LlamaBatch) -> Result<(), EncodeError> {
         let result =
-            unsafe { llama_cpp_sys_2::llama_encode(self.context.as_ptr(), batch.llama_batch) };
+            unsafe { llama_cpp_sys_2::llama_encode(self.context.lock().unwrap().as_ptr(), *batch.llama_batch.lock().unwrap()) };
 
         match NonZeroI32::new(result) {
             None => {
@@ -141,7 +146,7 @@ impl<'model> LlamaContext<'model> {
             usize::try_from(self.model.n_embd()).expect("n_embd does not fit into a usize");
 
         unsafe {
-            let embedding = llama_cpp_sys_2::llama_get_embeddings_seq(self.context.as_ptr(), i);
+            let embedding = llama_cpp_sys_2::llama_get_embeddings_seq(self.context.lock().unwrap().as_ptr(), i);
 
             // Technically also possible whenever `i >= max(batch.n_seq)`, but can't check that here.
             if embedding.is_null() {
@@ -177,7 +182,7 @@ impl<'model> LlamaContext<'model> {
             usize::try_from(self.model.n_embd()).expect("n_embd does not fit into a usize");
 
         unsafe {
-            let embedding = llama_cpp_sys_2::llama_get_embeddings_ith(self.context.as_ptr(), i);
+            let embedding = llama_cpp_sys_2::llama_get_embeddings_ith(self.context.lock().unwrap().as_ptr(), i);
             // Technically also possible whenever `i >= batch.n_tokens`, but no good way of checking `n_tokens` here.
             if embedding.is_null() {
                 Err(EmbeddingsError::LogitsNotEnabled)
@@ -235,7 +240,7 @@ impl<'model> LlamaContext<'model> {
     /// - token data returned is null
     #[must_use]
     pub fn get_logits(&self) -> &[f32] {
-        let data = unsafe { llama_cpp_sys_2::llama_get_logits(self.context.as_ptr()) };
+        let data = unsafe { llama_cpp_sys_2::llama_get_logits(self.context.lock().unwrap().as_ptr()) };
         assert!(!data.is_null(), "logits data for last token is null");
         let len = usize::try_from(self.model.n_vocab()).expect("n_vocab does not fit into a usize");
 
@@ -290,7 +295,7 @@ impl<'model> LlamaContext<'model> {
             i
         );
 
-        let data = unsafe { llama_cpp_sys_2::llama_get_logits_ith(self.context.as_ptr(), i) };
+        let data = unsafe { llama_cpp_sys_2::llama_get_logits_ith(self.context.lock().unwrap().as_ptr(), i) };
         let len = usize::try_from(self.model.n_vocab()).expect("n_vocab does not fit into a usize");
 
         unsafe { slice::from_raw_parts(data, len) }
@@ -298,12 +303,12 @@ impl<'model> LlamaContext<'model> {
 
     /// Reset the timings for the context.
     pub fn reset_timings(&mut self) {
-        unsafe { llama_cpp_sys_2::llama_perf_context_reset(self.context.as_ptr()) }
+        unsafe { llama_cpp_sys_2::llama_perf_context_reset(self.context.lock().unwrap().as_ptr()) }
     }
 
     /// Returns the timings for the context.
     pub fn timings(&mut self) -> LlamaTimings {
-        let timings = unsafe { llama_cpp_sys_2::llama_perf_context(self.context.as_ptr()) };
+        let timings = unsafe { llama_cpp_sys_2::llama_perf_context(self.context.lock().unwrap().as_ptr()) };
         LlamaTimings { timings }
     }
 
@@ -319,7 +324,7 @@ impl<'model> LlamaContext<'model> {
     ) -> Result<(), LlamaLoraAdapterSetError> {
         let err_code = unsafe {
             llama_cpp_sys_2::llama_set_adapter_lora(
-                self.context.as_ptr(),
+                self.context.lock().unwrap().as_ptr(),
                 adapter.lora_adapter.as_ptr(),
                 scale,
             )
@@ -343,7 +348,7 @@ impl<'model> LlamaContext<'model> {
     ) -> Result<(), LlamaLoraAdapterRemoveError> {
         let err_code = unsafe {
             llama_cpp_sys_2::llama_rm_adapter_lora(
-                self.context.as_ptr(),
+                self.context.lock().unwrap().as_ptr(),
                 adapter.lora_adapter.as_ptr(),
             )
         };
@@ -356,8 +361,8 @@ impl<'model> LlamaContext<'model> {
     }
 }
 
-impl Drop for LlamaContext<'_> {
+impl Drop for LlamaContext {
     fn drop(&mut self) {
-        unsafe { llama_cpp_sys_2::llama_free(self.context.as_ptr()) }
+        unsafe { llama_cpp_sys_2::llama_free(self.context.lock().unwrap().as_ptr()) }
     }
 }

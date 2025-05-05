@@ -249,7 +249,7 @@ fn batch_decode(
     );
 
     // Clear previous kv_cache values
-    ctx.clear_kv_cache();
+    ctx.kv_cache_clear();
 
     ctx.decode(batch).with_context(|| "llama_decode() failed")?;
 

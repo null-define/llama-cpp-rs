@@ -213,7 +213,7 @@ fn batch_decode(
     output: &mut Vec<Vec<f32>>,
     normalise: bool,
 ) -> Result<()> {
-    ctx.clear_kv_cache();
+    ctx.kv_cache_clear();
     ctx.decode(batch).with_context(|| "llama_decode() failed")?;
 
     for i in 0..s_batch {

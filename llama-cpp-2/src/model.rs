@@ -5,6 +5,7 @@ use std::os::raw::c_int;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::str::Utf8Error;
+use std::sync::Arc;
 
 use crate::context::params::LlamaContextParams;
 use crate::context::LlamaContext;
@@ -651,6 +652,11 @@ impl LlamaModel {
         })
     }
 
+    // A function that creates an Arc<A>
+    pub fn to_arc(self) -> Arc<Self> {
+        Arc::new(self)
+    }
+
     /// Create a new context from this model.
     ///
     /// # Errors
@@ -659,7 +665,7 @@ impl LlamaModel {
     // we intentionally do not derive Copy on `LlamaContextParams` to allow llama.cpp to change the type to be non-trivially copyable.
     #[allow(clippy::needless_pass_by_value)]
     pub fn new_context(
-        &self,
+        self: &Arc<Self>,
         _: &LlamaBackend,
         params: LlamaContextParams,
     ) -> Result<LlamaContext, LlamaContextLoadError> {
@@ -669,7 +675,7 @@ impl LlamaModel {
         };
         let context = NonNull::new(context).ok_or(LlamaContextLoadError::NullReturn)?;
 
-        Ok(LlamaContext::new(self, context, params.embeddings()))
+        Ok(LlamaContext::new(self.clone(), context, params.embeddings()))
     }
 
     /// Apply the models chat template to some messages.
